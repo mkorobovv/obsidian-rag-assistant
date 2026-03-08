@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 from huggingface_hub import InferenceClient
 
@@ -32,20 +33,49 @@ def _build_context_block(results: list[Augment]) -> str:
 class Chain:
     _client: InferenceClient = field(init=False)
     _history: list[dict] = field(default_factory=list, init=False)
+    _provider: str = field(init=False)
+    _model: str = field(init=False)
 
     def __post_init__(self):
-        if not config.api_token:
-            raise EnvironmentError("API_TOKEN is not set.")
-        self._client = InferenceClient(
-            api_key=os.environ["HF_TOKEN"],
-        )
+        provider = config.llm_provider.strip().lower()
+        self._provider = provider
+        self._model = config.llm_model
+
+        if provider == "hf":
+            token = (
+                config.api_token
+                or os.getenv("API_TOKEN", "")
+                or os.getenv("HF_TOKEN", "")
+            )
+            if not token:
+                raise EnvironmentError("Set API_TOKEN or HF_TOKEN for LLM_PROVIDER=hf.")
+            self._client = InferenceClient(
+                api_key=token,
+            )
+            return
+
+        if provider == "openai":
+            token = config.openai_api_key or os.getenv("OPENAI_API_KEY", "")
+            if not token:
+                raise EnvironmentError("Set OPENAI_API_KEY for LLM_PROVIDER=openai.")
+            self._client = InferenceClient(
+                provider="openai",
+                api_key=token,
+            )
+            return
+
+        raise EnvironmentError("Unsupported LLM_PROVIDER. Use one of: hf, openai.")
 
     def _trim_history(self):
         max_msgs = config.max_history * 2
         if len(self._history) > max_msgs:
             self._history = self._history[-max_msgs:]
 
-    def chat(self, user_query: str) -> tuple[str, list[Augment]]:
+    def chat(
+        self,
+        user_query: str,
+        on_token: Callable[[str], None] | None = None,
+    ) -> tuple[str, list[Augment]]:
         results = search(user_query)
 
         context = _build_context_block(results)
@@ -59,21 +89,19 @@ class Chain:
 
         full_response = ""
         stream = self._client.chat.completions.create(
-            model=config.llm_model,
+            model=self._model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 *self._history,
             ],
             stream=True,
-            max_tokens=config.max_tokens,
         )
 
         for chunk in stream:
             delta = chunk.choices[0].delta.content or ""
-            print(delta, end="", flush=True)
+            if delta and on_token:
+                on_token(delta)
             full_response += delta
-
-        print()
 
         self._history.append({"role": "assistant", "content": full_response})
 

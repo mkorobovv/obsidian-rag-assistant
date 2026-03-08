@@ -1,12 +1,11 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 
 import json
 
 from src.config.config import config
 from src.ingestion.indexer import get_collection
-
-
 
 @dataclass
 class Augment:
@@ -17,23 +16,27 @@ class Augment:
     tags: list[str]
     score: float
 
-    def format_citation(self) -> str:
-        parts = [f"📄 **{self.title}**"]
-        if self.heading:
-            parts.append(f"› {self.heading}")
-        parts.append(f"  `{self.source}`")
-        return "  ".join(parts)
+def _parse_tags(raw_tags: str) -> list[str]:
+    try:
+        parsed = json.loads(raw_tags)
+        if isinstance(parsed, list):
+            return [str(tag) for tag in parsed]
+    except (TypeError, json.JSONDecodeError):
+        pass
+    return []
+
 
 def search(query: str, top_k: int | None = None) -> list[Augment]:
     k = top_k or config.top_k
     collection = get_collection()
+    total_docs = collection.count()
 
-    if collection.count() == 0:
+    if total_docs == 0:
         return []
     
     results = collection.query(
         query_texts=[query],
-        n_results=min(k, collection.count()),
+        n_results=min(k, total_docs),
         include=["documents", "metadatas", "distances"],
     )
 
@@ -53,7 +56,7 @@ def search(query: str, top_k: int | None = None) -> list[Augment]:
                 source=meta.get("source", ""),
                 title=meta.get("title", ""),
                 heading=meta.get("heading", ""),
-                tags=json.loads(meta.get("tags", "[]")),
+                tags=_parse_tags(meta.get("tags", "[]")),
                 score=score,
             )
         )
